@@ -3,7 +3,7 @@
 import logging
 
 from plugin import InvenTreePlugin
-from plugin.mixins import BarcodeMixin, SettingsMixin
+from plugin.mixins import BarcodeMixin, SettingsMixin, UrlsMixin
 
 from .lookup import lookup_product
 from .validators import is_retail_barcode
@@ -11,7 +11,7 @@ from .validators import is_retail_barcode
 logger = logging.getLogger('inventree')
 
 
-class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
+class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, UrlsMixin, InvenTreePlugin):
     """Resolve retail UPC/EAN barcodes against external product databases.
 
     When a barcode is scanned:
@@ -19,13 +19,17 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
     2. Check if it's already assigned to a Part in the database.
     3. Look up the barcode in external databases (UPCitemdb, Open Food Facts).
     4. Optionally auto-create a Part from the lookup result.
+    5. Optionally create a StockItem at the default location.
+
+    Also exposes custom API endpoints for interactive location selection
+    and scan-to-stock operations.
     """
 
     NAME = 'RetailBarcodePlugin'
     SLUG = 'retail-barcode'
     TITLE = 'Retail Barcode Lookup'
     DESCRIPTION = 'Resolve retail UPC/EAN barcodes against product databases and optionally auto-create parts'
-    VERSION = '0.1.0'
+    VERSION = '0.2.0'
     AUTHOR = 'syntaxerr66'
 
     SETTINGS = {
@@ -70,7 +74,46 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
             ],
             'default': 'brand_name',
         },
+        'AUTO_ADD_STOCK': {
+            'name': 'Auto-Add Stock on Scan',
+            'description': (
+                'When auto-creating a Part from a standard barcode scan, '
+                'also create a StockItem at the default location. '
+                'Requires Auto-Create Parts to be enabled.'
+            ),
+            'validator': bool,
+            'default': False,
+        },
+        'DEFAULT_LOCATION': {
+            'name': 'Default Stock Location',
+            'description': (
+                'Stock location ID used when auto-adding stock from a standard '
+                'barcode scan, and as the initial default for the scan-to-stock '
+                'endpoint. Leave as 0 for no default.'
+            ),
+            'default': 0,
+        },
+        'DEFAULT_QUANTITY': {
+            'name': 'Default Quantity',
+            'description': 'Default quantity when auto-adding stock.',
+            'default': 1,
+        },
     }
+
+    # ── URL registration ──────────────────────────────────────────────
+
+    def setup_urls(self):
+        from django.urls import path
+
+        from .views import LastLocationView, LocationTreeView, ScanToStockView
+
+        return [
+            path('api/locations/', LocationTreeView.as_view(), name='retail-barcode-locations'),
+            path('api/scan-to-stock/', ScanToStockView.as_view(), name='retail-barcode-scan-to-stock'),
+            path('api/last-location/', LastLocationView.as_view(), name='retail-barcode-last-location'),
+        ]
+
+    # ── Standard barcode scan (BarcodeMixin) ──────────────────────────
 
     def scan(self, barcode_data):
         """Handle a barcode scan event.
@@ -79,19 +122,17 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
         Returns a dict with the matched Part data, or None to pass
         to the next barcode plugin.
         """
-        # Only handle string barcodes (not JSON/dict from InvenTree's own format)
         if not isinstance(barcode_data, str):
             return None
 
         barcode_data = barcode_data.strip()
 
-        # Step 1: Is this a retail barcode format?
         if not is_retail_barcode(barcode_data):
             return None
 
         logger.info('Retail barcode detected: %s', barcode_data)
 
-        # Step 2: Check if already assigned to a Part
+        # Check if already assigned to a Part
         existing = self._find_existing_part(barcode_data)
         if existing is not None:
             logger.info('Barcode %s matched existing Part pk=%s', barcode_data, existing.pk)
@@ -99,7 +140,7 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
                 'part': existing.format_matched_response(),
             }
 
-        # Step 3: Look up in external databases
+        # Look up in external databases
         product = lookup_product(barcode_data)
 
         if product is None:
@@ -108,10 +149,9 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
 
         logger.info('Barcode %s resolved to: %s', barcode_data, product)
 
-        # Step 4: Auto-create or return "not found"
         if not self.get_setting('AUTO_CREATE_PARTS'):
             logger.info(
-                'Auto-create disabled. Found product "%s" for barcode %s but not creating Part.',
+                'Auto-create disabled. Found "%s" for barcode %s but not creating Part.',
                 product.full_name(), barcode_data,
             )
             return None
@@ -120,9 +160,20 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
         if part is None:
             return None
 
+        # Optionally add stock at the default location
+        if self.get_setting('AUTO_ADD_STOCK'):
+            location_id = self._resolve_setting_int('DEFAULT_LOCATION')
+            quantity = self._resolve_setting_int('DEFAULT_QUANTITY') or 1
+            if location_id and location_id > 0:
+                self._create_stock_item(part, location_id, quantity)
+            else:
+                logger.info('AUTO_ADD_STOCK enabled but no DEFAULT_LOCATION set; skipping stock creation.')
+
         return {
             'part': part.format_matched_response(),
         }
+
+    # ── Shared helpers (used by both scan() and views) ────────────────
 
     def _find_existing_part(self, barcode_data: str):
         """Check if any Part already has this barcode assigned."""
@@ -132,21 +183,40 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
         barcode_hash = hash_barcode(barcode_data)
         return Part.lookup_barcode(barcode_hash)
 
+    def find_or_create_part(self, barcode_data: str):
+        """Find an existing Part by barcode, or create one from external lookup.
+
+        Returns (part, created) tuple. part is None if lookup fails or
+        the barcode format is invalid.
+        """
+        barcode_data = barcode_data.strip()
+
+        if not is_retail_barcode(barcode_data):
+            return None, False
+
+        existing = self._find_existing_part(barcode_data)
+        if existing is not None:
+            return existing, False
+
+        product = lookup_product(barcode_data)
+        if product is None:
+            return None, False
+
+        part = self._create_part(barcode_data, product)
+        return part, (part is not None)
+
     def _create_part(self, barcode_data: str, product):
         """Create a new Part from external product lookup data."""
         from part.models import Part, PartCategory
 
-        # Determine the part name
         name_format = self.get_setting('NAME_FORMAT')
         if name_format == 'brand_name':
             name = product.full_name()
         else:
             name = product.name
 
-        # Truncate to model field max_length (avoid DB errors)
         name = name[:100]
 
-        # Build description from available data
         desc_parts = []
         if product.description:
             desc_parts.append(product.description)
@@ -157,16 +227,10 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
             desc_parts.append(f'Source: {product.source}')
         description = ' | '.join(desc_parts)[:250]
 
-        # Resolve category
         category = None
-        cat_id = self.get_setting('DEFAULT_CATEGORY')
-        if cat_id:
-            try:
-                cat_id = int(cat_id)
-                if cat_id > 0:
-                    category = PartCategory.objects.filter(pk=cat_id).first()
-            except (ValueError, TypeError):
-                pass
+        cat_id = self._resolve_setting_int('DEFAULT_CATEGORY')
+        if cat_id and cat_id > 0:
+            category = PartCategory.objects.filter(pk=cat_id).first()
 
         try:
             part = Part.objects.create(
@@ -181,14 +245,11 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
             logger.error('Failed to create Part for barcode %s: %s', barcode_data, exc)
             return None
 
-        # Assign barcode
         try:
             part.assign_barcode(barcode_data=barcode_data, raise_error=False)
         except Exception as exc:
             logger.error('Failed to assign barcode %s to Part pk=%s: %s', barcode_data, part.pk, exc)
-            # Part was created but barcode wasn't assigned — still usable
 
-        # Set product image
         if self.get_setting('SET_IMAGE') and product.image_url:
             self._set_part_image(part, product.image_url)
 
@@ -197,6 +258,33 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
             part.pk, name, barcode_data, product.source,
         )
         return part
+
+    def _create_stock_item(self, part, location_id: int, quantity: int = 1):
+        """Create a StockItem for the given Part at the specified location."""
+        from stock.models import StockItem, StockLocation
+
+        location = StockLocation.objects.filter(pk=location_id).first()
+        if location is None:
+            logger.warning('Stock location pk=%s not found; skipping stock creation.', location_id)
+            return None
+
+        try:
+            item = StockItem.objects.create(
+                part=part,
+                location=location,
+                quantity=quantity,
+            )
+            logger.info(
+                'Created StockItem pk=%s (qty=%s) for Part pk=%s at location "%s" (pk=%s)',
+                item.pk, quantity, part.pk, location.name, location.pk,
+            )
+            return item
+        except Exception as exc:
+            logger.error(
+                'Failed to create StockItem for Part pk=%s at location pk=%s: %s',
+                part.pk, location_id, exc,
+            )
+            return None
 
     def _set_part_image(self, part, image_url: str):
         """Download and set a product image on the Part."""
@@ -217,7 +305,6 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
             logger.warning('URL %s returned non-image content-type: %s', image_url, content_type)
             return
 
-        # Determine file extension from content type
         ext_map = {
             'image/jpeg': '.jpg',
             'image/png': '.png',
@@ -226,7 +313,6 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
         }
         ext = ext_map.get(content_type.split(';')[0].strip(), '.jpg')
 
-        # Read image data (limit to 5MB)
         max_size = 5 * 1024 * 1024
         data = io.BytesIO()
         downloaded = 0
@@ -243,3 +329,13 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, InvenTreePlugin):
             logger.info('Set image on Part pk=%s from %s', part.pk, image_url)
         except Exception as exc:
             logger.error('Failed to save image for Part pk=%s: %s', part.pk, exc)
+
+    def _resolve_setting_int(self, key: str) -> int | None:
+        """Get a plugin setting as an integer, returning None on failure."""
+        val = self.get_setting(key)
+        if not val:
+            return None
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return None
