@@ -29,7 +29,7 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, UrlsMixin, InvenTreePlugi
     SLUG = 'retail-barcode'
     TITLE = 'Retail Barcode Lookup'
     DESCRIPTION = 'Resolve retail UPC/EAN barcodes against product databases and optionally auto-create parts'
-    VERSION = '0.2.0'
+    VERSION = '0.3.0'
     AUTHOR = 'syntaxerr66'
 
     SETTINGS = {
@@ -43,6 +43,17 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, UrlsMixin, InvenTreePlugi
             ),
             'validator': bool,
             'default': False,
+        },
+        'CREATE_UNKNOWN': {
+            'name': 'Create Unknown Products',
+            'description': (
+                'When a scanned barcode is a valid retail format (UPC/EAN) but '
+                'is not found in any external product database, still create a '
+                'placeholder Part with the barcode as the name. You can edit '
+                'the Part details later. Requires Auto-Create Parts to be enabled.'
+            ),
+            'validator': bool,
+            'default': True,
         },
         'DEFAULT_CATEGORY': {
             'name': 'Default Category',
@@ -143,20 +154,26 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, UrlsMixin, InvenTreePlugi
         # Look up in external databases
         product = lookup_product(barcode_data)
 
-        if product is None:
-            logger.info('Barcode %s not found in any external database', barcode_data)
-            return None
-
-        logger.info('Barcode %s resolved to: %s', barcode_data, product)
-
         if not self.get_setting('AUTO_CREATE_PARTS'):
-            logger.info(
-                'Auto-create disabled. Found "%s" for barcode %s but not creating Part.',
-                product.full_name(), barcode_data,
-            )
+            if product is not None:
+                logger.info(
+                    'Auto-create disabled. Found "%s" for barcode %s but not creating Part.',
+                    product.full_name(), barcode_data,
+                )
+            else:
+                logger.info('Barcode %s not found and auto-create disabled.', barcode_data)
             return None
 
-        part = self._create_part(barcode_data, product)
+        if product is not None:
+            logger.info('Barcode %s resolved to: %s', barcode_data, product)
+            part = self._create_part(barcode_data, product)
+        elif self.get_setting('CREATE_UNKNOWN'):
+            logger.info('Barcode %s not found externally; creating placeholder Part.', barcode_data)
+            part = self._create_placeholder_part(barcode_data)
+        else:
+            logger.info('Barcode %s not found and CREATE_UNKNOWN disabled.', barcode_data)
+            return None
+
         if part is None:
             return None
 
@@ -186,8 +203,9 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, UrlsMixin, InvenTreePlugi
     def find_or_create_part(self, barcode_data: str):
         """Find an existing Part by barcode, or create one from external lookup.
 
-        Returns (part, created) tuple. part is None if lookup fails or
-        the barcode format is invalid.
+        Returns (part, created) tuple. part is None if the barcode format
+        is invalid. When the external lookup fails, creates a placeholder
+        Part so the barcode is always captured.
         """
         barcode_data = barcode_data.strip()
 
@@ -199,10 +217,11 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, UrlsMixin, InvenTreePlugi
             return existing, False
 
         product = lookup_product(barcode_data)
-        if product is None:
-            return None, False
+        if product is not None:
+            part = self._create_part(barcode_data, product)
+        else:
+            part = self._create_placeholder_part(barcode_data)
 
-        part = self._create_part(barcode_data, product)
         return part, (part is not None)
 
     def _create_part(self, barcode_data: str, product):
@@ -256,6 +275,57 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, UrlsMixin, InvenTreePlugi
         logger.info(
             'Auto-created Part pk=%s name="%s" from barcode %s (source: %s)',
             part.pk, name, barcode_data, product.source,
+        )
+        return part
+
+    def _create_placeholder_part(self, barcode_data: str):
+        """Create a placeholder Part when the barcode isn't in any external DB.
+
+        The Part is named with the barcode so the user can identify and
+        rename it later.
+        """
+        from part.models import Part, PartCategory
+
+        barcode_len = len(barcode_data)
+        if barcode_len == 12:
+            barcode_type = 'UPC-A'
+        elif barcode_len == 13:
+            barcode_type = 'EAN-13'
+        else:
+            barcode_type = 'EAN-8'
+
+        name = f'Unknown Product ({barcode_data})'
+        description = (
+            f'{barcode_type} barcode {barcode_data} — not found in product databases. '
+            f'Edit this Part to add the correct name and details.'
+        )
+
+        category = None
+        cat_id = self._resolve_setting_int('DEFAULT_CATEGORY')
+        if cat_id and cat_id > 0:
+            category = PartCategory.objects.filter(pk=cat_id).first()
+
+        try:
+            part = Part.objects.create(
+                name=name,
+                description=description,
+                category=category,
+                component=False,
+                purchaseable=True,
+                active=True,
+            )
+        except Exception as exc:
+            logger.error('Failed to create placeholder Part for barcode %s: %s', barcode_data, exc)
+            return None
+
+        try:
+            part.assign_barcode(barcode_data=barcode_data, raise_error=False)
+        except Exception as exc:
+            logger.error('Failed to assign barcode %s to Part pk=%s: %s', barcode_data, part.pk, exc)
+
+        logger.info(
+            'Created placeholder Part pk=%s for unknown barcode %s',
+            part.pk, barcode_data,
         )
         return part
 
