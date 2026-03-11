@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inventree-barcode-lookup"
-version = "0.1.0"
+version = "0.3.0"
 description = "InvenTree plugin that resolves retail UPC/EAN barcodes against product databases and optionally auto-creates parts"
 readme = "README.md"
 license = {text = "MIT"}
