@@ -1,5 +1,7 @@
 # inventree-barcode-lookup
 
+> **Full disclosure:** This plugin was vibe-coded with [Claude](https://claude.ai/). It works, but your mileage may vary.
+
 An [InvenTree](https://inventree.org/) plugin that resolves retail UPC/EAN barcodes against external product databases. Scan a barcode from a store-bought product and InvenTree will look it up, optionally create a Part, and add stock at a location of your choice.
 
 ## Features
@@ -23,9 +25,10 @@ When you scan a barcode from the InvenTree app, a USB scanner, or any client hit
 2. This plugin checks if the barcode is a valid retail format (UPC-A, EAN-13, EAN-8)
 3. If the barcode is already assigned to a Part, it returns the match immediately
 4. Otherwise, it queries external product databases for product information
-5. If **Auto-Create Parts** is enabled, it creates a new Part and assigns the barcode
-6. If **Auto-Add Stock** is also enabled, it creates a StockItem at the **Default Location**
-7. If auto-create is disabled, it returns nothing (the app shows "barcode not found")
+5. If **Auto-Create Parts** is disabled, it returns nothing (the app shows "barcode not found")
+6. If the barcode is found in an external database, it creates a new Part with product name, description, brand, and image
+7. If the barcode is **not** found externally and **Create Unknown Products** is enabled, it creates a placeholder Part named "Unknown Product (barcode)" that you can edit later
+8. If **Auto-Add Stock** is also enabled, it creates a StockItem at the **Default Location**
 
 ### Scan-to-Stock Flow (Custom API)
 
@@ -54,7 +57,8 @@ Then restart InvenTree and enable the plugin in **Settings → Plugins**.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| **Auto-Create Parts** | Off | Create a new Part when a scanned barcode is found in an external database but doesn't match an existing Part |
+| **Auto-Create Parts** | Off | Create a new Part when a scanned retail barcode doesn't match an existing Part |
+| **Create Unknown Products** | On | When a barcode is valid UPC/EAN but not found in any external database, create a placeholder Part named "Unknown Product (barcode)". Requires Auto-Create Parts to be enabled |
 | **Default Category** | 0 (none) | Part category ID to assign to auto-created parts |
 | **Set Product Image** | On | Download and set the product image from the lookup result |
 | **Part Name Format** | Brand + Name | `brand_name` includes brand (e.g., "WD-40 Multi-Use Product"), `name_only` uses just the product name |

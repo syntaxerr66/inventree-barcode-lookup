@@ -11,6 +11,8 @@ import logging
 
 import requests
 
+from . import __version__
+
 logger = logging.getLogger('inventree')
 
 # Shared timeout for all external API calls (seconds)
@@ -95,7 +97,7 @@ def lookup_openfoodfacts(barcode: str) -> ProductInfo | None:
     No auth, no rate limit, focused on food/grocery products.
     """
     url = f'https://world.openfoodfacts.org/api/v2/product/{barcode}'
-    headers = {'User-Agent': 'InvenTreeBarcodePlugin/0.1 (https://github.com/syntaxerr66/inventree-barcode-lookup)'}
+    headers = {'User-Agent': f'InvenTreeBarcodePlugin/{__version__} (https://github.com/syntaxerr66/inventree-barcode-lookup)'}
 
     try:
         resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)

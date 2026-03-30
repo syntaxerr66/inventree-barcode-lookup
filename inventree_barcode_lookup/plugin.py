@@ -5,6 +5,7 @@ import logging
 from plugin import InvenTreePlugin
 from plugin.mixins import BarcodeMixin, SettingsMixin, UrlsMixin
 
+from . import __version__
 from .lookup import lookup_product
 from .validators import is_retail_barcode
 
@@ -29,7 +30,7 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, UrlsMixin, InvenTreePlugi
     SLUG = 'retail-barcode'
     TITLE = 'Retail Barcode Lookup'
     DESCRIPTION = 'Resolve retail UPC/EAN barcodes against product databases and optionally auto-create parts'
-    VERSION = '0.3.0'
+    VERSION = __version__
     AUTHOR = 'syntaxerr66'
 
     SETTINGS = {
