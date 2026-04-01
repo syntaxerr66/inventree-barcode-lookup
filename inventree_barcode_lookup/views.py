@@ -13,6 +13,8 @@ from django.http import JsonResponse
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
+from InvenTree.permissions import RolePermission
+
 logger = logging.getLogger('inventree')
 
 # Cache timeout for last-used location: 90 days
@@ -60,7 +62,8 @@ class LocationTreeView(APIView):
         }
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RolePermission]
+    role_required = 'stock_location'
 
     def get(self, request):
         from stock.models import StockLocation
@@ -121,7 +124,8 @@ class ScanToStockView(APIView):
     It also saves the selected location as the user's last-used location.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RolePermission]
+    role_required = 'stock.add'
 
     def post(self, request):
         from stock.models import StockLocation
@@ -236,7 +240,8 @@ class LastLocationView(APIView):
         Clear the user's last-used location (revert to plugin default).
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RolePermission]
+    role_required = 'stock_location'
 
     def get(self, request):
         from stock.models import StockLocation

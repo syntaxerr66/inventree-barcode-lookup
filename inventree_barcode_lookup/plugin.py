@@ -357,12 +357,44 @@ class RetailBarcodePlugin(BarcodeMixin, SettingsMixin, UrlsMixin, InvenTreePlugi
             )
             return None
 
+    def _is_safe_image_url(self, url: str) -> bool:
+        """Validate that an image URL is safe to fetch (not pointing at internal resources)."""
+        import ipaddress
+        import socket
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return False
+
+        if parsed.scheme not in ('http', 'https'):
+            return False
+
+        if not parsed.hostname:
+            return False
+
+        try:
+            resolved_ip = ipaddress.ip_address(socket.gethostbyname(parsed.hostname))
+        except (socket.gaierror, ValueError):
+            logger.warning('Could not resolve hostname for image URL: %s', url)
+            return False
+
+        if resolved_ip.is_private or resolved_ip.is_loopback or resolved_ip.is_link_local or resolved_ip.is_reserved:
+            logger.warning('Image URL %s resolves to non-public IP %s, blocking', url, resolved_ip)
+            return False
+
+        return True
+
     def _set_part_image(self, part, image_url: str):
         """Download and set a product image on the Part."""
         import io
 
         import requests
         from django.core.files.base import ContentFile
+
+        if not self._is_safe_image_url(image_url):
+            return
 
         try:
             resp = requests.get(image_url, timeout=15, stream=True)
